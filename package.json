@@ -1,0 +1,12 @@
+{
+  "name": "generateur-documents-ma",
+  "version": "1.0.0",
+  "description": "Générateur de documents administratifs et commerciaux (Maroc) - bilingue FR/AR",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
