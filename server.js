@@ -1,19 +1,100 @@
-// Générateur de Documents MA — application 100% autonome côté client (aucune
-// base de données, aucun compte). Ce serveur ne fait que servir les fichiers
-// statiques ; toute la logique (formulaires, aperçu, export Word/PDF) tourne
-// dans le navigateur.
+// Générateur de Documents MA — application autonome côté client (formulaires,
+// aperçu, export Word/PDF tournent entièrement dans le navigateur). Ce
+// serveur sert les fichiers statiques et expose une API de sauvegarde cloud
+// optionnelle (compte par code, sans mot de passe) : l'app fonctionne très
+// bien sans jamais y toucher, elle reste utile pour retrouver ses données
+// sur un autre appareil.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const db = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
-const server = http.createServer((req, res) => {
+function sendJSON(res, status, data) {
+  const body = JSON.stringify(data);
+  res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
+  res.end(body);
+}
+
+function parseBody(req) {
+  return new Promise((resolve, reject) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 5e6) reject(new Error('Too large')); });
+    req.on('end', () => { try { resolve(JSON.parse(body || '{}')); } catch (e) { resolve({}); } });
+    req.on('error', reject);
+  });
+}
+
+const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
-  let filePath = path.join(ROOT, decodeURIComponent(url.pathname));
-  if (url.pathname === '/') filePath = path.join(ROOT, 'index.html');
+  const pathname = url.pathname;
+
+  // ── API sauvegarde cloud ────────────────────────────────────
+  // POST /api/register — crée un compte avec un code unique généré serveur
+  // (vérifié en base). Ce code est ensuite le seul identifiant nécessaire
+  // pour sauvegarder/restaurer les données sur n'importe quel appareil.
+  if (pathname === '/api/register' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const name = (typeof body.name === 'string' ? body.name : '').trim().slice(0, 80);
+    if (!name) return sendJSON(res, 400, { error: 'Le nom est obligatoire' });
+    try {
+      const user = await db.registerUser(name);
+      return sendJSON(res, 200, user);
+    } catch (e) {
+      console.error('Erreur inscription:', e);
+      return sendJSON(res, 500, { error: 'Échec de la création du compte' });
+    }
+  }
+
+  if (pathname.match(/^\/api\/user\/[A-Z0-9]{4,12}$/) && req.method === 'GET') {
+    const code = pathname.split('/')[3];
+    try {
+      const user = await db.getUser(code);
+      if (!user) return sendJSON(res, 404, { error: 'Compte introuvable' });
+      return sendJSON(res, 200, user);
+    } catch (e) {
+      console.error('Erreur lecture compte:', e);
+      return sendJSON(res, 500, { error: 'Échec de la lecture du compte' });
+    }
+  }
+
+  // POST /api/sync — sauvegarde les données d'un compte déjà inscrit. Un
+  // code inconnu n'est jamais créé à la volée : il faut s'être inscrit via
+  // /api/register, pour que chaque sauvegarde soit bien rattachée à un
+  // compte (nom + code), pas à un code anonyme généré en douce.
+  if (pathname === '/api/sync' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (typeof body.data !== 'object' || body.data === null) return sendJSON(res, 400, { error: 'data requis' });
+    const code = typeof body.code === 'string' ? body.code : '';
+    if (!/^[A-Z0-9]{4,12}$/.test(code)) return sendJSON(res, 400, { error: 'Compte requis — créez-en un d\'abord.' });
+    try {
+      const updatedAt = await db.saveBackup(code, body.data);
+      if (!updatedAt) return sendJSON(res, 404, { error: 'Compte introuvable' });
+      return sendJSON(res, 200, { code, updatedAt });
+    } catch (e) {
+      console.error('Erreur sauvegarde sync:', e);
+      return sendJSON(res, 500, { error: 'Échec de la sauvegarde' });
+    }
+  }
+
+  if (pathname.match(/^\/api\/sync\/[A-Z0-9]{4,12}$/) && req.method === 'GET') {
+    const code = pathname.split('/')[3];
+    try {
+      const rec = await db.loadBackup(code);
+      if (!rec) return sendJSON(res, 404, { error: 'Code introuvable' });
+      return sendJSON(res, 200, rec);
+    } catch (e) {
+      console.error('Erreur restauration sync:', e);
+      return sendJSON(res, 500, { error: 'Échec de la restauration' });
+    }
+  }
+
+  // ── Fichiers statiques ─────────────────────────────────────
+  let filePath = path.join(ROOT, decodeURIComponent(pathname));
+  if (pathname === '/') filePath = path.join(ROOT, 'index.html');
   if (!filePath.startsWith(ROOT)) { res.writeHead(403); return res.end('Forbidden'); }
   fs.readFile(filePath, (err, data) => {
     if (err) {
@@ -28,4 +109,14 @@ const server = http.createServer((req, res) => {
   });
 });
 
-server.listen(PORT, () => console.log('Générateur de Documents MA servi sur le port ' + PORT));
+db.initDb()
+  .then(() => {
+    server.listen(PORT, () => console.log('Générateur de Documents MA servi sur le port ' + PORT));
+  })
+  .catch(e => {
+    console.error('Échec initialisation base de données:', e);
+    // La sauvegarde cloud restera indisponible, mais l'app statique doit
+    // quand même démarrer plutôt que de tout bloquer (elle marche très bien
+    // sans compte cloud).
+    server.listen(PORT, () => console.log('Générateur de Documents MA servi sur le port ' + PORT + ' (sans DB)'));
+  });

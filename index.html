@@ -4,6 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Générateur de Documents — Entreprise Maroc</title>
+<meta name="theme-color" content="#1f3864">
+<meta name="description" content="300 modèles de documents administratifs et commerciaux marocains, bilingues français/arabe, avec export Word et PDF.">
+<link rel="manifest" href="/manifest.json">
+<link rel="icon" href="/icon-192.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Documents MA">
 <style>
   :root{--blue:#1f3864;--blue2:#2e4a7d;--bg:#f4f6fb;--line:#dfe4ee;--accent:#1f3864;--txt:#1c2430;--muted:#6b7686;}
   *{box-sizing:border-box}
@@ -134,6 +142,7 @@
   <button class="btn-ghost" id="menuToggle" onclick="toggleCatalog()" aria-label="Ouvrir le catalogue de documents">☰</button>
   <h1>🗎 Générateur de Documents <span style="opacity:.6;font-weight:400">— Entreprise Maroc</span></h1>
   <button class="btn-ghost" onclick="openProfile()">🏢 <span id="coName">Profil entreprise</span></button>
+  <button class="btn-ghost" onclick="openClients()">📇 Clients</button>
   <button class="btn-ghost" onclick="openHistory()">📋 Historique</button>
   <div class="sp"></div>
   <div class="langsel" id="langsel">
@@ -191,9 +200,32 @@
       </div>
       <p style="font-size:11.5px;color:var(--muted);margin:8px 0 0">Utile sur iPhone : exportez régulièrement pour ne rien perdre, et réimportez sur un autre appareil.</p>
     </div>
+    <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+      <label style="display:block;font-size:12px;font-weight:600;color:#41506a;margin-bottom:6px">☁ Sauvegarde cloud (optionnelle)</label>
+      <div id="cloudStatus"></div>
+    </div>
     <div style="text-align:right;margin-top:14px">
       <button class="btn btn-ghost" style="background:#eee;color:#333" onclick="closeProfile()">Fermer</button>
       <button class="btn btn-primary" onclick="saveProfile()">Enregistrer</button>
+    </div>
+  </div>
+</div>
+
+<!-- Clients modal -->
+<div class="modal" id="clientsModal">
+  <div class="card">
+    <h2>📇 Répertoire clients</h2>
+    <p style="color:var(--muted);font-size:13px;margin-top:-6px">Enregistrez vos clients une fois, puis réutilisez-les depuis n'importe quel document (sélecteur affiché au-dessus du champ « Client »).</p>
+    <div id="clientsList"></div>
+    <div style="border-top:1px solid var(--line);margin-top:14px;padding-top:12px">
+      <label style="display:block;font-size:12px;font-weight:600;color:#41506a;margin-bottom:6px">Ajouter un client</label>
+      <div class="field"><label>Nom du client / tiers</label><input id="newClientNom" type="text"></div>
+      <div class="field"><label>Adresse</label><input id="newClientAdresse" type="text"></div>
+      <div class="field"><label>ICE (si société)</label><input id="newClientICE" type="text"></div>
+      <button class="btn btn-primary" style="width:100%" onclick="addClient()">+ Ajouter au répertoire</button>
+    </div>
+    <div style="text-align:right;margin-top:14px">
+      <button class="btn btn-ghost" style="background:#eee;color:#333" onclick="closeClients()">Fermer</button>
     </div>
   </div>
 </div>
@@ -213,13 +245,15 @@
 
 <script>
 /* ============================ ÉTAT & PERSISTANCE ============================ */
-const LS=(k,v)=>{try{if(v===undefined)return JSON.parse(localStorage.getItem(k));localStorage.setItem(k,JSON.stringify(v));}catch(e){return null;}};
+const CLOUD_KEYS=['mg_company','mg_state','mg_history','mg_clients'];
+const LS=(k,v)=>{try{if(v===undefined)return JSON.parse(localStorage.getItem(k));localStorage.setItem(k,JSON.stringify(v));if(CLOUD_KEYS.includes(k))scheduleCloudSync();}catch(e){return null;}};
 let COMPANY = LS('mg_company') || {
   nom:'', forme:'SARL', adresse:'', ville:'Casablanca', tel:'', email:'',
   ice:'', if_:'', tp:'', rc:'', cnss:'', capital:'', rib:'', tva:'assujetti', logo:''
 };
 let STATE = LS('mg_state') || {};   // formData par docId
 let HISTORY = LS('mg_history') || [];
+let CLIENTS = LS('mg_clients') || [];
 let LANG = 'fr';
 let CURRENT = null;
 
@@ -1607,7 +1641,7 @@ DOCS.push(
 function renderCatalog(){
   const q=(document.getElementById('search').value||'').toLowerCase();
   const fams={};
-  DOCS.filter(d=>!q||d.t.fr.toLowerCase().includes(q)||d.t.ar.includes(q)||d.fam.toLowerCase().includes(q))
+  DOCS.filter(d=>!q||d.t.fr.toLowerCase().includes(q)||d.t.ar.includes(q)||d.fam.toLowerCase().includes(q)||d.hint.fr.toLowerCase().includes(q)||d.hint.ar.includes(q))
     .forEach(d=>{(fams[d.fam]=fams[d.fam]||[]).push(d);});
   let html='';
   Object.keys(fams).forEach(f=>{
@@ -1633,11 +1667,20 @@ function fdata(){STATE[CURRENT]=STATE[CURRENT]||{};return STATE[CURRENT];}
 function renderForm(){
   const doc=docById(CURRENT);if(!doc)return;
   const d=fdata();
-  // defaults
-  doc.fields.forEach(f=>{if(d[f.name]===undefined&&f.def!==undefined)d[f.name]=f.def;});
+  // defaults (le numéro n'est pas pré-rempli : voir ensureNumero() — laissé vide,
+  // il devient automatique au moment d'enregistrer/exporter le document)
+  doc.fields.forEach(f=>{if(f.name!=='numero'&&d[f.name]===undefined&&f.def!==undefined)d[f.name]=f.def;});
   let h=`<h2 class="section">${doc.t.fr} — ${doc.t.ar}</h2>`;
   h+=`<div class="hint">⚖ ${doc.hint.fr}<br><span style="direction:rtl;display:block">${doc.hint.ar}</span></div>`;
-  doc.fields.forEach(f=>{h+=fieldHTML(f,d[f.name]);});
+  let hasClientField=false;
+  doc.fields.forEach(f=>{
+    if(f.name==='clientNom'){
+      hasClientField=true;
+      if(CLIENTS.length)h+=`<div class="field"><label>📇 Client enregistré</label><select onchange="pickClient(this.value)"><option value="">— Choisir dans le répertoire —</option>${CLIENTS.map((c,i)=>`<option value="${i}">${esc(c.nom)}</option>`).join('')}</select></div>`;
+    }
+    h+=fieldHTML(f,d[f.name]);
+  });
+  if(hasClientField)h+=`<button class="btn" style="width:100%;margin:2px 0 12px;background:#f4f6fb;color:var(--blue);font-size:12px" onclick="saveCurrentClient()">💾 Enregistrer ce client dans le répertoire</button>`;
   h+=`<div style="margin-top:14px;display:flex;gap:8px">
       <button class="btn btn-primary" style="flex:1" onclick="exportWord()">⬇ Word</button>
       <button class="btn btn-p" style="flex:1" onclick="printPDF()" title="Astuce : dans la boîte de dialogue d'impression, désactivez « En-têtes et pieds de page » pour un PDF sans URL ni date ajoutées par le navigateur.">⬇ PDF</button></div>
@@ -1654,7 +1697,35 @@ function fieldHTML(f,val){
   if(f.type==='money'||f.type==='number')return `<div class="field"><label>${lab}</label><input type="number" step="0.01" value="${esc(val)}" oninput="upd('${f.name}',this.value)"></div>`;
   if(f.type==='lines')return linesHTML('lignes',val,true);
   if(f.type==='linesqty')return linesHTML('lignesBL',val,false);
-  return `<div class="field"><label>${lab}</label><input type="text" value="${esc(val)}" oninput="upd('${f.name}',this.value)"></div>`;
+  const ph=f.name==='numero'?' placeholder="Laisser vide = numéro automatique"':(f.def?` placeholder="${esc(f.def)}"`:'');
+  return `<div class="field"><label>${lab}</label><input type="text" value="${esc(val)}"${ph} oninput="upd('${f.name}',this.value)"></div>`;
+}
+/* ============================ NUMÉROTATION AUTOMATIQUE ============================ */
+// Si l'utilisateur saisit un numéro, il est toujours respecté tel quel. S'il laisse
+// le champ vide, un numéro séquentiel est attribué au moment de la finalisation
+// (enregistrement historique / export Word / impression), pas avant — pour ne pas
+// « brûler » de numéros en navigant simplement dans le catalogue.
+function nextNumero(doc){
+  const f=(doc.fields||[]).find(x=>x.name==='numero');
+  if(!f||!f.def)return'';
+  const m=f.def.match(/^([A-Za-z0-9]+)-(\d{4})-(\d+)$/);
+  if(!m)return'';
+  const width=m[3].length;
+  const year=new Date().getFullYear();
+  const counters=LS('mg_counters')||{};
+  const next=(counters[doc.id]||0)+1;
+  counters[doc.id]=next;
+  LS('mg_counters',counters);
+  return m[1]+'-'+year+'-'+String(next).padStart(width,'0');
+}
+function ensureNumero(){
+  const doc=docById(CURRENT);if(!doc)return;
+  if(!(doc.fields||[]).some(f=>f.name==='numero'))return;
+  const d=fdata();
+  if(!d.numero||!d.numero.trim()){
+    d.numero=nextNumero(doc);
+    persist();renderForm();renderPreview();
+  }
 }
 function linesHTML(name,val,withPrice){
   const lines=Array.isArray(val)?val:[];
@@ -1691,6 +1762,8 @@ function currentDocMarkup(){
   return docHTML(LANG);
 }
 function exportWord(){
+  if(!CURRENT){alert('Choisissez d\'abord un document.');return;}
+  ensureNumero();
   const inner=currentDocMarkup();if(!inner)return;
   const styles=document.querySelector('style').innerHTML;
   const doc=docById(CURRENT);
@@ -1703,6 +1776,7 @@ function exportWord(){
 }
 function printPDF(){
   if(!CURRENT){alert('Choisissez d\'abord un document.');return;}
+  ensureNumero();
   renderPreview();               // s'assure que #printArea contient le document courant
   // Certains navigateurs (impression/« Enregistrer en PDF ») ajoutent en en-tête/pied
   // de page le titre de l'onglet et l'URL — ici un chemin de fichier local. On
@@ -1723,6 +1797,7 @@ function printPDF(){
 function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.style.opacity='1';setTimeout(()=>{t.style.opacity='0';},1800);}
 function saveToHistory(){
   if(!CURRENT){toast('Choisissez un document.');return;}
+  ensureNumero();
   const doc=docById(CURRENT);const d=fdata();
   HISTORY.unshift({hid:Date.now(),docId:CURRENT,title:doc.t.fr,num:d.numero||'',date:d.date||today(),who:d.clientNom||d.salarie||d.st||d.de||d.locataire||'',snap:JSON.parse(JSON.stringify(d))});
   if(HISTORY.length>200)HISTORY.pop();
@@ -1794,6 +1869,52 @@ const PROFILE_FIELDS=[
   ['tel','Téléphone'],['email','E-mail'],['ice','ICE'],['if_','Identifiant fiscal (IF)'],
   ['tp','N° Taxe professionnelle'],['rc','RC'],['cnss','CNSS'],['capital','Capital (DH)'],['rib','RIB / IBAN']
 ];
+/* ============================ RÉPERTOIRE CLIENTS ============================ */
+function openClients(){renderClientsList();document.getElementById('clientsModal').classList.add('show');}
+function closeClients(){document.getElementById('clientsModal').classList.remove('show');}
+function renderClientsList(){
+  const el=document.getElementById('clientsList');
+  if(!CLIENTS.length){el.innerHTML='<p style="color:#999;font-size:13px">Aucun client enregistré pour l\'instant.</p>';return;}
+  el.innerHTML=CLIENTS.map((c,i)=>`<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)">
+    <div style="font-size:13px"><b>${esc(c.nom)}</b>${c.adresse?'<br><span style="color:var(--muted);font-size:12px">'+esc(c.adresse)+'</span>':''}${c.ice?'<br><span style="color:var(--muted);font-size:12px">ICE: '+esc(c.ice)+'</span>':''}</div>
+    <button class="btn btn-ghost" style="background:#f2d7d2;color:#a33;flex-shrink:0" onclick="delClient(${i})">Suppr.</button>
+  </div>`).join('');
+}
+function addClient(){
+  const nom=document.getElementById('newClientNom').value.trim();
+  if(!nom){toast('Le nom du client est requis.');return;}
+  const adresse=document.getElementById('newClientAdresse').value.trim();
+  const ice=document.getElementById('newClientICE').value.trim();
+  CLIENTS.push({nom,adresse,ice});
+  LS('mg_clients',CLIENTS);
+  document.getElementById('newClientNom').value='';
+  document.getElementById('newClientAdresse').value='';
+  document.getElementById('newClientICE').value='';
+  renderClientsList();
+  toast('✓ Client ajouté au répertoire');
+}
+function delClient(i){
+  CLIENTS.splice(i,1);
+  LS('mg_clients',CLIENTS);
+  renderClientsList();
+}
+function saveCurrentClient(){
+  const d=fdata();
+  if(!d.clientNom||!d.clientNom.trim()){toast('Renseignez au moins le nom du client.');return;}
+  const rec={nom:d.clientNom.trim(),adresse:(d.clientAdresse||'').trim(),ice:(d.clientICE||'').trim()};
+  const existing=CLIENTS.findIndex(c=>c.nom===rec.nom);
+  if(existing>=0)CLIENTS[existing]=rec;else CLIENTS.push(rec);
+  LS('mg_clients',CLIENTS);
+  toast('✓ Client enregistré dans le répertoire');
+}
+function pickClient(idx){
+  if(idx==='')return;
+  const c=CLIENTS[idx];if(!c)return;
+  const d=fdata();
+  d.clientNom=c.nom;d.clientAdresse=c.adresse||'';d.clientICE=c.ice||'';
+  persist();renderForm();renderPreview();
+}
+
 function openProfile(){
   let h='';
   PROFILE_FIELDS.forEach(([k,l])=>{h+=`<div class="field"><label>${l}</label><input value="${esc(COMPANY[k]||'')}" oninput="COMPANY['${k}']=this.value"></div>`;});
@@ -1801,15 +1922,108 @@ function openProfile(){
       <option value="assujetti" ${COMPANY.tva==='assujetti'?'selected':''}>Assujetti à la TVA</option>
       <option value="auto" ${COMPANY.tva==='auto'?'selected':''}>Auto-entrepreneur (TVA non applicable, art. 91 CGI)</option></select></div>`;
   document.getElementById('profileForm').innerHTML=h;
+  updateCloudStatus();
   document.getElementById('profileModal').classList.add('show');
 }
 function closeProfile(){document.getElementById('profileModal').classList.remove('show');}
 function loadLogo(e){const f=e.target.files[0];if(!f)return;const r=new FileReader();r.onload=()=>{COMPANY.logo=r.result;};r.readAsDataURL(f);}
 function saveProfile(){LS('mg_company',COMPANY);document.getElementById('coName').textContent=COMPANY.nom||'Profil entreprise';closeProfile();renderPreview();}
 
+/* ============================ SAUVEGARDE CLOUD ============================ */
+// Optionnelle : l'app fonctionne entièrement sans compte (données en local).
+// Un compte cloud (identifié par un code, sans mot de passe) permet de
+// retrouver profil + documents + historique + clients sur un autre appareil.
+let CLOUD_CODE=localStorage.getItem('mg_cloud_code')||'';
+let cloudSyncTimer=null;
+function scheduleCloudSync(){
+  if(!CLOUD_CODE)return;
+  clearTimeout(cloudSyncTimer);
+  cloudSyncTimer=setTimeout(doCloudSync,1500);
+}
+async function doCloudSync(){
+  if(!CLOUD_CODE)return;
+  try{
+    const data={company:COMPANY,state:STATE,history:HISTORY,clients:CLIENTS};
+    const res=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:CLOUD_CODE,data})});
+    const j=await res.json();
+    if(!res.ok)return;
+    localStorage.setItem('mg_cloud_last_sync',j.updatedAt||new Date().toISOString());
+    updateCloudStatus();
+  }catch(e){ /* hors-ligne : la copie locale reste la référence, on réessaiera au prochain changement */ }
+}
+async function cloudRegister(){
+  const name=(document.getElementById('cloudName').value||'').trim();
+  if(!name){toast('Indiquez un nom pour créer le compte.');return;}
+  try{
+    const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const j=await res.json();
+    if(!res.ok){toast(j.error||'Échec de la création du compte.');return;}
+    CLOUD_CODE=j.code;
+    localStorage.setItem('mg_cloud_code',CLOUD_CODE);
+    toast('✓ Compte créé — notez le code : '+CLOUD_CODE);
+    await doCloudSync();
+    updateCloudStatus();
+  }catch(e){toast('Échec — vérifiez la connexion.');}
+}
+async function cloudRestore(){
+  const code=(document.getElementById('cloudCodeInput').value||'').trim().toUpperCase();
+  if(!code){toast('Indiquez un code.');return;}
+  try{
+    const res=await fetch('/api/sync/'+encodeURIComponent(code));
+    if(!res.ok){toast('Code introuvable.');return;}
+    const j=await res.json();
+    const data=j.data||{};
+    if(data.company)COMPANY=data.company;
+    if(data.state)STATE=data.state;
+    if(data.history)HISTORY=data.history;
+    if(data.clients)CLIENTS=data.clients;
+    localStorage.setItem('mg_company',JSON.stringify(COMPANY));
+    localStorage.setItem('mg_state',JSON.stringify(STATE));
+    localStorage.setItem('mg_history',JSON.stringify(HISTORY));
+    localStorage.setItem('mg_clients',JSON.stringify(CLIENTS));
+    CLOUD_CODE=code;
+    localStorage.setItem('mg_cloud_code',CLOUD_CODE);
+    localStorage.setItem('mg_cloud_last_sync',j.updatedAt||new Date().toISOString());
+    toast('✓ Données restaurées depuis le cloud');
+    document.getElementById('coName').textContent=COMPANY.nom||'Profil entreprise';
+    renderCatalog();if(CURRENT){renderForm();renderPreview();}
+    updateCloudStatus();
+  }catch(e){toast('Échec — vérifiez la connexion.');}
+}
+function cloudLogout(){
+  CLOUD_CODE='';
+  localStorage.removeItem('mg_cloud_code');
+  toast('Compte dissocié de cet appareil (les données restent en ligne).');
+  updateCloudStatus();
+}
+function updateCloudStatus(){
+  const el=document.getElementById('cloudStatus');if(!el)return;
+  if(CLOUD_CODE){
+    const last=localStorage.getItem('mg_cloud_last_sync');
+    el.innerHTML=`<p style="font-size:12.5px;color:var(--muted);margin:0 0 8px">Compte actif — code <b style="color:var(--ink,#1c2430)">${esc(CLOUD_CODE)}</b>${last?' · dernière synchro '+esc(new Date(last).toLocaleString('fr-FR')):' · synchronisation en cours…'}</p>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <button class="btn btn-ghost" style="background:#e7edfb;color:var(--blue)" onclick="doCloudSync()">↻ Synchroniser maintenant</button>
+        <button class="btn btn-ghost" style="background:#f4f6fb;color:#7a8699" onclick="cloudLogout()">Se déconnecter de cet appareil</button>
+      </div>`;
+  } else {
+    el.innerHTML=`<p style="font-size:11.5px;color:var(--muted);margin:0 0 8px">Créez un compte (juste un nom, sans mot de passe) pour retrouver vos données sur un autre téléphone ou ordinateur — ou entrez un code existant pour restaurer une sauvegarde.</p>
+      <div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">
+        <input id="cloudName" type="text" placeholder="Votre nom" style="flex:1;min-width:140px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <button class="btn btn-primary" style="flex-shrink:0" onclick="cloudRegister()">Créer un compte cloud</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap">
+        <input id="cloudCodeInput" type="text" placeholder="Code existant (ex. AB12CD34)" style="flex:1;min-width:140px;text-transform:uppercase;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <button class="btn btn-ghost" style="background:#e7edfb;color:var(--blue);flex-shrink:0" onclick="cloudRestore()">Restaurer</button>
+      </div>`;
+  }
+}
+
 /* ============================ INIT ============================ */
 document.getElementById('coName').textContent=COMPANY.nom||'Profil entreprise';
 renderCatalog();
+if('serviceWorker' in navigator){
+  window.addEventListener('load',()=>{navigator.serviceWorker.register('/sw.js').catch(()=>{});});
+}
 </script>
 </body>
 </html>
