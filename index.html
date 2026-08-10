@@ -1956,20 +1956,30 @@ function saveProfile(){LS('mg_company',COMPANY);document.getElementById('coName'
 
 /* ============================ SAUVEGARDE CLOUD ============================ */
 // Optionnelle : l'app fonctionne entièrement sans compte (données en local).
-// Un compte cloud (identifié par un code, sans mot de passe) permet de
-// retrouver profil + documents + historique + clients sur un autre appareil.
+// Chaque compte est protégé par un mot de passe — le code seul ne suffit
+// jamais à lire ou écrire les données (isolation totale entre comptes). Le
+// mot de passe n'est envoyé qu'à la connexion ; ensuite, seul un jeton de
+// session (obtenu après vérification du mot de passe) est conservé sur cet
+// appareil pour les synchronisations automatiques.
 let CLOUD_CODE=localStorage.getItem('mg_cloud_code')||'';
+let CLOUD_TOKEN=localStorage.getItem('mg_cloud_token')||'';
 let cloudSyncTimer=null;
 function scheduleCloudSync(){
-  if(!CLOUD_CODE)return;
+  if(!CLOUD_TOKEN)return;
   clearTimeout(cloudSyncTimer);
   cloudSyncTimer=setTimeout(doCloudSync,1500);
 }
+function cloudSessionExpired(){
+  CLOUD_TOKEN='';localStorage.removeItem('mg_cloud_token');
+  toast('Session cloud expirée — reconnectez-vous avec votre code et mot de passe.');
+  updateCloudStatus();
+}
 async function doCloudSync(){
-  if(!CLOUD_CODE)return;
+  if(!CLOUD_TOKEN)return;
   try{
     const data={company:COMPANY,state:STATE,history:HISTORY,clients:CLIENTS};
-    const res=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:CLOUD_CODE,data})});
+    const res=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:CLOUD_TOKEN,data})});
+    if(res.status===401){cloudSessionExpired();return;}
     const j=await res.json();
     if(!res.ok)return;
     localStorage.setItem('mg_cloud_last_sync',j.updatedAt||new Date().toISOString());
@@ -1978,13 +1988,16 @@ async function doCloudSync(){
 }
 async function cloudRegister(){
   const name=(document.getElementById('cloudName').value||'').trim();
+  const password=document.getElementById('cloudPassword').value||'';
   if(!name){toast('Indiquez un nom pour créer le compte.');return;}
+  if(password.length<6){toast('Le mot de passe doit faire au moins 6 caractères.');return;}
   try{
-    const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+    const res=await fetch('/api/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,password})});
     const j=await res.json();
     if(!res.ok){toast(j.error||'Échec de la création du compte.');return;}
-    CLOUD_CODE=j.code;
+    CLOUD_CODE=j.code;CLOUD_TOKEN=j.token;
     localStorage.setItem('mg_cloud_code',CLOUD_CODE);
+    localStorage.setItem('mg_cloud_token',CLOUD_TOKEN);
     toast('✓ Compte créé — notez le code : '+CLOUD_CODE);
     await doCloudSync();
     updateCloudStatus();
@@ -1992,10 +2005,15 @@ async function cloudRegister(){
 }
 async function cloudRestore(){
   const code=(document.getElementById('cloudCodeInput').value||'').trim().toUpperCase();
-  if(!code){toast('Indiquez un code.');return;}
+  const password=document.getElementById('cloudRestorePassword').value||'';
+  if(!code||!password){toast('Indiquez le code et le mot de passe du compte.');return;}
   try{
-    const res=await fetch('/api/sync/'+encodeURIComponent(code));
-    if(!res.ok){toast('Code introuvable.');return;}
+    const loginRes=await fetch('/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,password})});
+    const loginJ=await loginRes.json();
+    if(!loginRes.ok){toast(loginJ.error||'Code ou mot de passe incorrect.');return;}
+    const token=loginJ.token;
+    const res=await fetch('/api/restore',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})});
+    if(!res.ok){toast('Échec de la restauration.');return;}
     const j=await res.json();
     const data=j.data||{};
     if(data.company)COMPANY=data.company;
@@ -2006,8 +2024,9 @@ async function cloudRestore(){
     localStorage.setItem('mg_state',JSON.stringify(STATE));
     localStorage.setItem('mg_history',JSON.stringify(HISTORY));
     localStorage.setItem('mg_clients',JSON.stringify(CLIENTS));
-    CLOUD_CODE=code;
+    CLOUD_CODE=code;CLOUD_TOKEN=token;
     localStorage.setItem('mg_cloud_code',CLOUD_CODE);
+    localStorage.setItem('mg_cloud_token',CLOUD_TOKEN);
     localStorage.setItem('mg_cloud_last_sync',j.updatedAt||new Date().toISOString());
     toast('✓ Données restaurées depuis le cloud');
     document.getElementById('coName').textContent=COMPANY.nom||'Profil entreprise';
@@ -2016,14 +2035,15 @@ async function cloudRestore(){
   }catch(e){toast('Échec — vérifiez la connexion.');}
 }
 function cloudLogout(){
-  CLOUD_CODE='';
-  localStorage.removeItem('mg_cloud_code');
+  if(CLOUD_TOKEN)fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:CLOUD_TOKEN})}).catch(()=>{});
+  CLOUD_CODE='';CLOUD_TOKEN='';
+  localStorage.removeItem('mg_cloud_code');localStorage.removeItem('mg_cloud_token');
   toast('Compte dissocié de cet appareil (les données restent en ligne).');
   updateCloudStatus();
 }
 function updateCloudStatus(){
   const el=document.getElementById('cloudStatus');if(!el)return;
-  if(CLOUD_CODE){
+  if(CLOUD_TOKEN){
     const last=localStorage.getItem('mg_cloud_last_sync');
     el.innerHTML=`<p style="font-size:12.5px;color:var(--muted);margin:0 0 8px">Compte actif — code <b style="color:var(--ink,#1c2430)">${esc(CLOUD_CODE)}</b>${last?' · dernière synchro '+esc(new Date(last).toLocaleString('fr-FR')):' · synchronisation en cours…'}</p>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
@@ -2031,14 +2051,16 @@ function updateCloudStatus(){
         <button class="btn btn-ghost" style="background:#f4f6fb;color:#7a8699" onclick="cloudLogout()">Se déconnecter de cet appareil</button>
       </div>`;
   } else {
-    el.innerHTML=`<p style="font-size:11.5px;color:var(--muted);margin:0 0 8px">Créez un compte (juste un nom, sans mot de passe) pour retrouver vos données sur un autre téléphone ou ordinateur — ou entrez un code existant pour restaurer une sauvegarde.</p>
+    el.innerHTML=`<p style="font-size:11.5px;color:var(--muted);margin:0 0 8px">Créez un compte (nom + mot de passe) pour retrouver vos données sur un autre téléphone ou ordinateur — ou connectez-vous à un compte existant pour restaurer une sauvegarde. Chaque compte est protégé par son mot de passe : personne d'autre ne peut lire vos données même en devinant le code.</p>
       <div style="display:flex;gap:8px;margin-bottom:6px;flex-wrap:wrap">
-        <input id="cloudName" type="text" placeholder="Votre nom" style="flex:1;min-width:140px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <input id="cloudName" type="text" placeholder="Votre nom" style="flex:1;min-width:120px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <input id="cloudPassword" type="password" placeholder="Mot de passe (6+ car.)" style="flex:1;min-width:120px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
         <button class="btn btn-primary" style="flex-shrink:0" onclick="cloudRegister()">Créer un compte cloud</button>
       </div>
       <div style="display:flex;gap:8px;flex-wrap:wrap">
-        <input id="cloudCodeInput" type="text" placeholder="Code existant (ex. AB12CD34)" style="flex:1;min-width:140px;text-transform:uppercase;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
-        <button class="btn btn-ghost" style="background:#e7edfb;color:var(--blue);flex-shrink:0" onclick="cloudRestore()">Restaurer</button>
+        <input id="cloudCodeInput" type="text" placeholder="Code (ex. AB12CD34)" style="flex:1;min-width:110px;text-transform:uppercase;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <input id="cloudRestorePassword" type="password" placeholder="Mot de passe" style="flex:1;min-width:110px;padding:8px 10px;border:1px solid var(--line);border-radius:7px;font-size:13px">
+        <button class="btn btn-ghost" style="background:#e7edfb;color:var(--blue);flex-shrink:0" onclick="cloudRestore()">Se connecter</button>
       </div>`;
   }
 }

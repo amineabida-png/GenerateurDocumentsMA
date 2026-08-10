@@ -1,9 +1,9 @@
 // Générateur de Documents MA — application autonome côté client (formulaires,
 // aperçu, export Word/PDF tournent entièrement dans le navigateur). Ce
 // serveur sert les fichiers statiques et expose une API de sauvegarde cloud
-// optionnelle (compte par code, sans mot de passe) : l'app fonctionne très
-// bien sans jamais y toucher, elle reste utile pour retrouver ses données
-// sur un autre appareil.
+// optionnelle (compte par code + mot de passe) : l'app fonctionne très bien
+// sans jamais y toucher, elle reste utile pour retrouver ses données sur un
+// autre appareil, chaque compte étant isolé par mot de passe.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -58,15 +58,22 @@ const server = http.createServer(async (req, res) => {
   const pathname = url.pathname;
 
   // ── API sauvegarde cloud ────────────────────────────────────
-  // POST /api/register — crée un compte avec un code unique généré serveur
-  // (vérifié en base). Ce code est ensuite le seul identifiant nécessaire
-  // pour sauvegarder/restaurer les données sur n'importe quel appareil.
+  // Chaque compte est protégé par un mot de passe (haché en base, jamais
+  // stocké en clair). Le code seul n'ouvre plus jamais l'accès aux données :
+  // toute lecture/écriture passe par un jeton de session obtenu après
+  // vérification du mot de passe (via /api/register ou /api/login), ce qui
+  // isole réellement chaque compte des autres.
+
+  // POST /api/register {name,password} — crée un compte avec un code unique
+  // généré serveur, retourne un jeton de session déjà valide.
   if (pathname === '/api/register' && req.method === 'POST') {
     const body = await parseBody(req);
     const name = (typeof body.name === 'string' ? body.name : '').trim().slice(0, 80);
+    const password = typeof body.password === 'string' ? body.password : '';
     if (!name) return sendJSON(res, 400, { error: 'Le nom est obligatoire' });
+    if (password.length < 6) return sendJSON(res, 400, { error: 'Le mot de passe doit faire au moins 6 caractères.' });
     try {
-      const user = await db.registerUser(name);
+      const user = await db.registerUser(name, password);
       return sendJSON(res, 200, user);
     } catch (e) {
       console.error('Erreur inscription:', e);
@@ -74,42 +81,56 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
-  if (pathname.match(/^\/api\/user\/[A-Z0-9]{4,12}$/) && req.method === 'GET') {
-    const code = pathname.split('/')[3];
+  // POST /api/login {code,password} — vérifie le mot de passe et retourne
+  // un nouveau jeton de session (pour se reconnecter sur un autre appareil).
+  if (pathname === '/api/login' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const code = (typeof body.code === 'string' ? body.code : '').trim().toUpperCase();
+    const password = typeof body.password === 'string' ? body.password : '';
+    if (!/^[A-Z0-9]{4,12}$/.test(code) || !password) return sendJSON(res, 400, { error: 'Code et mot de passe requis.' });
     try {
-      const user = await db.getUser(code);
-      if (!user) return sendJSON(res, 404, { error: 'Compte introuvable' });
-      return sendJSON(res, 200, user);
+      const session = await db.login(code, password);
+      if (!session) return sendJSON(res, 401, { error: 'Code ou mot de passe incorrect.' });
+      return sendJSON(res, 200, session);
     } catch (e) {
-      console.error('Erreur lecture compte:', e);
-      return sendJSON(res, 500, { error: 'Échec de la lecture du compte' });
+      console.error('Erreur connexion:', e);
+      return sendJSON(res, 500, { error: 'Échec de la connexion' });
     }
   }
 
-  // POST /api/sync — sauvegarde les données d'un compte déjà inscrit. Un
-  // code inconnu n'est jamais créé à la volée : il faut s'être inscrit via
-  // /api/register, pour que chaque sauvegarde soit bien rattachée à un
-  // compte (nom + code), pas à un code anonyme généré en douce.
+  // POST /api/logout {token} — invalide la session côté serveur.
+  if (pathname === '/api/logout' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (typeof body.token === 'string' && body.token) await db.destroySession(body.token).catch(() => {});
+    return sendJSON(res, 200, { ok: true });
+  }
+
+  // POST /api/sync {token,data} — sauvegarde les données du compte propriétaire du jeton.
   if (pathname === '/api/sync' && req.method === 'POST') {
     const body = await parseBody(req);
     if (typeof body.data !== 'object' || body.data === null) return sendJSON(res, 400, { error: 'data requis' });
-    const code = typeof body.code === 'string' ? body.code : '';
-    if (!/^[A-Z0-9]{4,12}$/.test(code)) return sendJSON(res, 400, { error: 'Compte requis — créez-en un d\'abord.' });
+    const token = typeof body.token === 'string' ? body.token : '';
     try {
+      const code = token && await db.codeForToken(token);
+      if (!code) return sendJSON(res, 401, { error: 'Session expirée — reconnectez-vous.' });
       const updatedAt = await db.saveBackup(code, body.data);
       if (!updatedAt) return sendJSON(res, 404, { error: 'Compte introuvable' });
-      return sendJSON(res, 200, { code, updatedAt });
+      return sendJSON(res, 200, { updatedAt });
     } catch (e) {
       console.error('Erreur sauvegarde sync:', e);
       return sendJSON(res, 500, { error: 'Échec de la sauvegarde' });
     }
   }
 
-  if (pathname.match(/^\/api\/sync\/[A-Z0-9]{4,12}$/) && req.method === 'GET') {
-    const code = pathname.split('/')[3];
+  // POST /api/restore {token} — récupère les données du compte propriétaire du jeton.
+  if (pathname === '/api/restore' && req.method === 'POST') {
+    const body = await parseBody(req);
+    const token = typeof body.token === 'string' ? body.token : '';
     try {
+      const code = token && await db.codeForToken(token);
+      if (!code) return sendJSON(res, 401, { error: 'Session expirée — reconnectez-vous.' });
       const rec = await db.loadBackup(code);
-      if (!rec) return sendJSON(res, 404, { error: 'Code introuvable' });
+      if (!rec) return sendJSON(res, 404, { error: 'Compte introuvable' });
       return sendJSON(res, 200, rec);
     } catch (e) {
       console.error('Erreur restauration sync:', e);
