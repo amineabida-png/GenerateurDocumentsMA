@@ -1684,6 +1684,7 @@ function renderForm(){
   h+=`<div style="margin-top:14px;display:flex;gap:8px">
       <button class="btn btn-primary" style="flex:1" onclick="exportWord()">⬇ Word</button>
       <button class="btn btn-p" style="flex:1" onclick="printPDF()" title="Astuce : dans la boîte de dialogue d'impression, désactivez « En-têtes et pieds de page » pour un PDF sans URL ni date ajoutées par le navigateur.">⬇ PDF</button></div>
+      <button class="btn" id="pdfServerBtn" style="width:100%;margin-top:8px;background:#e7edfb;color:var(--blue)" onclick="printPDFServer()" title="Génère le PDF sur le serveur : rendu identique quel que soit le navigateur, pas de dépendance à la boîte de dialogue d'impression.">⬇ PDF (rendu serveur, identique partout)</button>
       <button class="btn" style="width:100%;margin-top:8px;background:#e7edfb;color:var(--blue)" onclick="saveToHistory()">💾 Enregistrer dans l'historique</button>
       <button class="btn" style="width:100%;margin-top:6px;background:#f4f6fb;color:#7a8699" onclick="resetForm()">🗑 Vider le formulaire</button>`;
   document.getElementById('formpane').innerHTML=h;
@@ -1791,6 +1792,30 @@ function printPDF(){
   window.addEventListener('afterprint',restore,{once:true});
   setTimeout(restore,3000); // filet de sécurité si 'afterprint' ne se déclenche pas (iOS Safari)
   setTimeout(()=>window.print(),150); // impression en page : le CSS @media print n'affiche que #printArea (compatible iOS)
+}
+async function printPDFServer(){
+  if(!CURRENT){alert('Choisissez d\'abord un document.');return;}
+  ensureNumero();
+  const inner=currentDocMarkup();if(!inner)return;
+  const styles=document.querySelector('style').innerHTML;
+  const doc=docById(CURRENT);
+  const html=`<!doctype html><html><head><meta charset='utf-8'><style>${styles}
+    body{background:#fff}.sheet{box-shadow:none;margin:0}</style></head><body>${inner}</body></html>`;
+  const filename=(doc.t.fr.replace(/[^a-z0-9]+/gi,'_'))+'_'+(fdata().numero||today());
+  const btn=document.getElementById('pdfServerBtn');
+  const original=btn?btn.textContent:'';
+  if(btn){btn.textContent='⏳ Génération…';btn.disabled=true;}
+  try{
+    const res=await fetch('/api/pdf',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({html,filename})});
+    if(!res.ok){const j=await res.json().catch(()=>({}));toast(j.error||'Échec de la génération PDF.');return;}
+    const blob=await res.blob();
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=filename+'.pdf';a.click();
+    toast('✓ PDF téléchargé');
+  }catch(e){
+    toast('Échec — vérifiez la connexion.');
+  }finally{
+    if(btn){btn.textContent=original;btn.disabled=false;}
+  }
 }
 
 /* ============================ HISTORIQUE ============================ */

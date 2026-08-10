@@ -13,6 +13,31 @@ const PORT = process.env.PORT || 3000;
 const ROOT = __dirname;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'application/javascript', '.css': 'text/css', '.json': 'application/json', '.png': 'image/png', '.svg': 'image/svg+xml', '.ico': 'image/x-icon' };
 
+// puppeteer est un module ESM : require() plante avec ERR_REQUIRE_ESM, il
+// faut un import() dynamique. Le navigateur Chromium est coûteux à lancer,
+// donc on le garde ouvert entre deux appels plutôt que d'en relancer un par
+// PDF (retenu de l'intégration identique sur Tijara).
+let browserPromise = null;
+async function getBrowser() {
+  if (browserPromise) return browserPromise;
+  browserPromise = (async () => {
+    const puppeteer = (await import('puppeteer')).default;
+    return puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
+  })();
+  browserPromise.catch(() => { browserPromise = null; }); // relance possible après un échec transitoire
+  return browserPromise;
+}
+async function renderPdf(html) {
+  const browser = await getBrowser();
+  const page = await browser.newPage();
+  try {
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.pdf({ format: 'A4', printBackground: true, margin: { top: '14mm', bottom: '14mm', left: '14mm', right: '14mm' } });
+  } finally {
+    await page.close();
+  }
+}
+
 function sendJSON(res, status, data) {
   const body = JSON.stringify(data);
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
@@ -89,6 +114,26 @@ const server = http.createServer(async (req, res) => {
     } catch (e) {
       console.error('Erreur restauration sync:', e);
       return sendJSON(res, 500, { error: 'Échec de la restauration' });
+    }
+  }
+
+  // POST /api/pdf — rendu PDF serveur (Puppeteer), en complément du bouton
+  // d'impression navigateur : rendu identique quel que soit le
+  // navigateur/OS du client, sans dépendre de son moteur d'impression.
+  if (pathname === '/api/pdf' && req.method === 'POST') {
+    const body = await parseBody(req);
+    if (typeof body.html !== 'string' || !body.html.trim()) return sendJSON(res, 400, { error: 'html requis' });
+    try {
+      const pdf = await renderPdf(body.html);
+      res.writeHead(200, {
+        'Content-Type': 'application/pdf',
+        'Content-Length': pdf.length,
+        'Content-Disposition': `attachment; filename="${(body.filename || 'document').replace(/[^a-zA-Z0-9_\-.]/g, '_')}.pdf"`,
+      });
+      return res.end(pdf);
+    } catch (e) {
+      console.error('Erreur génération PDF:', e);
+      return sendJSON(res, 500, { error: 'Échec de la génération du PDF côté serveur' });
     }
   }
 
